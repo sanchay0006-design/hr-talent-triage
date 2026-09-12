@@ -49,19 +49,20 @@ with col1:
     )
 
 with col2:
-    st.subheader("2. Candidate Resume")
+    st.subheader("2. Candidate Resumes")
     input_method = st.radio(
         "Choose input method:",
-        ["Upload PDF", "Paste Resume Text"],
+        ["Upload PDFs (Batch)", "Paste Resume Text"],
         horizontal=True,
     )
 
-    uploaded_file = None
+    uploaded_files = []
     pasted_resume = ""
 
-    if input_method == "Upload PDF":
-        uploaded_file = st.file_uploader(
-            "Upload candidate resume (PDF only)", type=["pdf"]
+    if input_method == "Upload PDFs (Batch)":
+        # TWEAK 1: accept_multiple_files is now True
+        uploaded_files = st.file_uploader(
+            "Upload candidate resumes (PDFs)", type=["pdf"], accept_multiple_files=True
         )
     else:
         pasted_resume = st.text_area(
@@ -80,36 +81,47 @@ def extract_text_from_pdf(file) -> str:
 
 
 # Evaluation Trigger
-if st.button("Evaluate Candidate & Generate Response", type="primary"):
-    resume_text = ""
-    if input_method == "Upload PDF" and uploaded_file:
-        try:
-            resume_text = extract_text_from_pdf(uploaded_file)
-        except Exception as e:
-            st.error(f"Failed to read PDF: {e}")
-    elif input_method == "Paste Resume Text" and pasted_resume.strip():
-        resume_text = pasted_resume.strip()
-
+if st.button("Evaluate Batch & Generate Responses", type="primary"):
     if not api_key:
         st.error("Please provide a Gemini API Key in the left sidebar.")
-    elif not resume_text:
-        st.warning("Please upload a resume PDF or paste resume text to proceed.")
+    elif input_method == "Upload PDFs (Batch)" and not uploaded_files:
+        st.warning("Please upload at least one resume PDF to proceed.")
+    elif input_method == "Paste Resume Text" and not pasted_resume.strip():
+        st.warning("Please paste resume text to proceed.")
     elif not jd_text.strip():
         st.warning("Job description cannot be empty.")
     else:
-        with st.spinner("Analyzing resume and drafting communication..."):
-            try:
-                # Initialize Gemini Client
-                client = genai.Client(api_key=api_key)
+        # Prepare the list of candidates to process
+        candidates_to_process = []
+        if input_method == "Upload PDFs (Batch)":
+            for file in uploaded_files:
+                try:
+                    text = extract_text_from_pdf(file)
+                    candidates_to_process.append({"name": file.name, "text": text})
+                except Exception as e:
+                    st.error(f"Failed to read {file.name}: {e}")
+        else:
+            candidates_to_process.append({"name": "Pasted Candidate", "text": pasted_resume.strip()})
 
-                system_instruction = (
-                    "You are an expert Talent Acquisition Assessor for Horizon Group. "
-                    "Your objective is to conduct an objective, unbiased evaluation of the candidate "
-                    "against the job requirements. Evaluate transferable capabilities and semantic context, "
-                    "not just exact keywords. You must output strictly valid JSON matching the requested schema."
-                )
+        # Initialize AI Client
+        try:
+            client = genai.Client(api_key=api_key)
+            system_instruction = (
+                "You are an expert Talent Acquisition Assessor for Horizon Group. "
+                "Your objective is to conduct an objective, unbiased evaluation of the candidate "
+                "against the job requirements. Evaluate transferable capabilities and semantic context, "
+                "not just exact keywords. You must output strictly valid JSON matching the requested schema."
+            )
 
-                prompt = f"""
+            st.success(f"Processing batch of {len(candidates_to_process)} candidate(s)...")
+            st.markdown("---")
+
+            # TWEAK 2: Loop through each candidate in the batch
+            for idx, candidate in enumerate(candidates_to_process):
+                st.subheader(f"📄 Evaluating: {candidate['name']}")
+                
+                with st.spinner(f"Analyzing {candidate['name']} and drafting communication..."):
+                    prompt = f"""
 Job Description:
 \"\"\"
 {jd_text}
@@ -117,7 +129,7 @@ Job Description:
 
 Candidate Resume Text:
 \"\"\"
-{resume_text}
+{candidate['text']}
 \"\"\"
 
 Analyze the candidate against the role requirements and return a JSON object with EXACTLY these keys:
@@ -129,59 +141,60 @@ Analyze the candidate against the role requirements and return a JSON object wit
     If match_score >= 70: Draft an interview invitation mentioning specific strengths from their resume.
     If match_score < 70: Draft a respectful, personalized rejection that explains the gap constructive to their growth, ensuring they feel evaluated rather than ignored.
 """
+                    try:
+                        # Model updated to 3.6-flash
+                        response = client.models.generate_content(
+                            model="gemini-3.6-flash",
+                            contents=prompt,
+                            config=types.GenerateContentConfig(
+                                system_instruction=system_instruction,
+                                response_mime_type="application/json",
+                                temperature=0.2,
+                            ),
+                        )
 
-                response = client.models.generate_content(
-                    model="gemini-3.6-flash",
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        system_instruction=system_instruction,
-                        response_mime_type="application/json",
-                        temperature=0.2,
-                    ),
-                )
+                        result = json.loads(response.text)
 
-                result = json.loads(response.text)
+                        # Display Results for this specific candidate
+                        res_col1, res_col2 = st.columns([1, 2])
 
-                st.success("Evaluation complete!")
+                        with res_col1:
+                            st.metric(
+                                label="Match Score",
+                                value=f"{result.get('match_score', 0)}/100",
+                            )
+                            st.write(
+                                f"**Name:** {result.get('candidate_name', 'N/A')}"
+                            )
+
+                            if result.get("match_score", 0) >= 70:
+                                st.success("Recommendation: Shortlist")
+                            else:
+                                st.info("Recommendation: Archive / Nurture")
+
+                        with res_col2:
+                            st.write("**Explainable AI Fit Assessment:**")
+                            for point in result.get("fit_rationales", []):
+                                st.write(f"- {point}")
+
+                            if result.get("skill_gaps"):
+                                st.write("**Identified Capability Gaps:**")
+                                for gap in result.get("skill_gaps", []):
+                                    st.write(f"- ⚠️ {gap}")
+
+                        st.markdown("**Automated Empathetic Communication:**")
+                        st.text_area(
+                            f"Draft Email for {result.get('candidate_name', 'Candidate')}:",
+                            value=result.get("candidate_email", ""),
+                            height=200,
+                            key=f"email_{idx}" # Unique key required when rendering multiple text areas
+                        )
+
+                    except Exception as e:
+                        st.error(f"AI evaluation failed for {candidate['name']}: {e}")
+                
+                # Add a visual separator between candidates
                 st.markdown("---")
 
-                res_col1, res_col2 = st.columns([1, 2])
-
-                with res_col1:
-                    st.metric(
-                        label="Evaluation Match Score",
-                        value=f"{result.get('match_score', 0)}/100",
-                    )
-                    st.write(
-                        f"**Candidate:** {result.get('candidate_name', 'N/A')}"
-                    )
-
-                    if result.get("match_score", 0) >= 70:
-                        st.success("Recommendation: Shortlist")
-                    else:
-                        st.info("Recommendation: Archive / Nurture")
-
-                with res_col2:
-                    st.write("**Explainable AI Fit Assessment:**")
-                    for point in result.get("fit_rationales", []):
-                        st.write(f"- {point}")
-
-                    if result.get("skill_gaps"):
-                        st.write("**Identified Capability Gaps:**")
-                        for gap in result.get("skill_gaps", []):
-                            st.write(f"- ⚠️ {gap}")
-
-                st.markdown("---")
-
-                st.subheader(
-                    "3. Automated Empathetic Candidate Communication"
-                )
-                email_text = result.get("candidate_email", "")
-                st.text_area(
-                    "Generated Draft Email:",
-                    value=email_text,
-                    height=240,
-                )
-
-            except Exception as e:
-                st.error(f"An error occurred during evaluation: {e}")
+        except Exception as e:
+            st.error(f"Failed to initialize Gemini Client: {e}")
