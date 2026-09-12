@@ -35,32 +35,40 @@ col1, col2 = st.columns([1, 1])
 
 with col1:
     st.subheader("1. Job Description")
-    default_jd = (
-        "Role: Senior Manager - Data and AI Solutions\n"
-        "Department: Tech Services\n"
-        "Key Requirements:\n"
-        "- 7+ years in enterprise analytics, machine learning, or cloud data architecture.\n"
-        "- Proven track record leading client-facing AI transformation projects.\n"
-        "- Experience in stakeholder management and cross-functional team leadership.\n"
-        "- Strong understanding of data governance, MLOps, and scalable data pipelines."
+    jd_input_method = st.radio(
+        "Choose JD input method:",
+        ["Upload JD (PDF)", "Paste JD Text"],
+        horizontal=True,
+        key="jd_radio"
     )
-    jd_text = st.text_area(
-        "Paste or edit the Job Description:", value=default_jd, height=220
-    )
+
+    jd_file = None
+    jd_text_input = ""
+
+    if jd_input_method == "Upload JD (PDF)":
+        jd_file = st.file_uploader(
+            "Upload Job Description (PDF only)", type=["pdf"], key="jd_upload"
+        )
+    else:
+        jd_text_input = st.text_area(
+            "Paste Job Description text directly:",
+            height=180,
+            placeholder="Paste role requirements here...",
+        )
 
 with col2:
     st.subheader("2. Candidate Resumes")
-    input_method = st.radio(
-        "Choose input method:",
-        ["Upload PDFs (Batch)", "Paste Resume Text"],
+    resume_input_method = st.radio(
+        "Choose Resume input method:",
+        ["Upload Resumes (Batch PDF)", "Paste Resume Text"],
         horizontal=True,
+        key="resume_radio"
     )
 
     uploaded_files = []
     pasted_resume = ""
 
-    if input_method == "Upload PDFs (Batch)":
-        # TWEAK 1: accept_multiple_files is now True
+    if resume_input_method == "Upload Resumes (Batch PDF)":
         uploaded_files = st.file_uploader(
             "Upload candidate resumes (PDFs)", type=["pdf"], accept_multiple_files=True
         )
@@ -82,18 +90,30 @@ def extract_text_from_pdf(file) -> str:
 
 # Evaluation Trigger
 if st.button("Evaluate Batch & Generate Responses", type="primary"):
+    
+    # 1. Resolve JD Text
+    jd_text = ""
+    if jd_input_method == "Upload JD (PDF)" and jd_file:
+        try:
+            jd_text = extract_text_from_pdf(jd_file)
+        except Exception as e:
+            st.error(f"Failed to read JD PDF: {e}")
+    elif jd_input_method == "Paste JD Text" and jd_text_input.strip():
+        jd_text = jd_text_input.strip()
+
+    # 2. Validations
     if not api_key:
         st.error("Please provide a Gemini API Key in the left sidebar.")
-    elif input_method == "Upload PDFs (Batch)" and not uploaded_files:
+    elif not jd_text:
+        st.warning("Please upload or paste a Job Description to proceed.")
+    elif resume_input_method == "Upload Resumes (Batch PDF)" and not uploaded_files:
         st.warning("Please upload at least one resume PDF to proceed.")
-    elif input_method == "Paste Resume Text" and not pasted_resume.strip():
+    elif resume_input_method == "Paste Resume Text" and not pasted_resume.strip():
         st.warning("Please paste resume text to proceed.")
-    elif not jd_text.strip():
-        st.warning("Job description cannot be empty.")
     else:
-        # Prepare the list of candidates to process
+        # 3. Prepare the list of candidates to process
         candidates_to_process = []
-        if input_method == "Upload PDFs (Batch)":
+        if resume_input_method == "Upload Resumes (Batch PDF)":
             for file in uploaded_files:
                 try:
                     text = extract_text_from_pdf(file)
@@ -103,7 +123,7 @@ if st.button("Evaluate Batch & Generate Responses", type="primary"):
         else:
             candidates_to_process.append({"name": "Pasted Candidate", "text": pasted_resume.strip()})
 
-        # Initialize AI Client
+        # 4. Initialize AI Client & Process
         try:
             client = genai.Client(api_key=api_key)
             system_instruction = (
@@ -116,7 +136,6 @@ if st.button("Evaluate Batch & Generate Responses", type="primary"):
             st.success(f"Processing batch of {len(candidates_to_process)} candidate(s)...")
             st.markdown("---")
 
-            # TWEAK 2: Loop through each candidate in the batch
             for idx, candidate in enumerate(candidates_to_process):
                 st.subheader(f"📄 Evaluating: {candidate['name']}")
                 
@@ -142,7 +161,6 @@ Analyze the candidate against the role requirements and return a JSON object wit
     If match_score < 70: Draft a respectful, personalized rejection that explains the gap constructive to their growth, ensuring they feel evaluated rather than ignored.
 """
                     try:
-                        # Model updated to 3.6-flash
                         response = client.models.generate_content(
                             model="gemini-3.6-flash",
                             contents=prompt,
@@ -155,7 +173,6 @@ Analyze the candidate against the role requirements and return a JSON object wit
 
                         result = json.loads(response.text)
 
-                        # Display Results for this specific candidate
                         res_col1, res_col2 = st.columns([1, 2])
 
                         with res_col1:
@@ -187,13 +204,12 @@ Analyze the candidate against the role requirements and return a JSON object wit
                             f"Draft Email for {result.get('candidate_name', 'Candidate')}:",
                             value=result.get("candidate_email", ""),
                             height=200,
-                            key=f"email_{idx}" # Unique key required when rendering multiple text areas
+                            key=f"email_{idx}" 
                         )
 
                     except Exception as e:
                         st.error(f"AI evaluation failed for {candidate['name']}: {e}")
                 
-                # Add a visual separator between candidates
                 st.markdown("---")
 
         except Exception as e:
